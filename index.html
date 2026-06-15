@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pylon Performance Management System-ทดสอบแก้ไข</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-datalabels/2.2.0/chartjs-plugin-datalabels.min.js"></script>
+<script>
+  Chart.register(ChartDataLabels);
+  Chart.defaults.plugins.datalabels = {
+    display: true,
+    color: '#1A1035',
+    font: { weight: 'bold', size: 11 },
+    formatter: (value) => (typeof value === 'number' ? value.toFixed(2) : value)
+  };
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap');
