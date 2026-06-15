@@ -1153,6 +1153,9 @@ let CUR_EMP = null;
 let SCORES = {};
 let RADAR = null;
 let SB_GRP = 'hq';
+let SB_TEAM = 'all';
+const PM_TEAM_FILTER_USERS = ['110001','110004','110006','110009','110010'];
+function getTeamLabel(t){ return t===null||t===undefined?'ส่วนกลาง (ไม่มีชุด)':t; }
 
 // ===== LOGIN =====
 let selRoleVal = 'admin';
@@ -1596,6 +1599,7 @@ function initEvalSidebar(){
     +   'background:#1A2550;border:1px solid rgba(255,255,255,.15);border-top:none;max-height:260px;overflow-y:auto;border-radius:0 0 8px 8px;box-shadow:0 8px 24px rgba(0,0,0,.4)"></div>'
     + '</div>'
     + '<div class="sb-emp-tabs" id="sbEmpTabs"></div>'
+    + '<div id="sbTeamFilter"></div>'
     + '<div class="sb-emp-list" id="sbEmpList" style="flex:1;overflow-y:auto;min-height:0"></div>'
     + '<div class="sb-nav" style="border-top:1px solid rgba(255,255,255,.12);padding-top:4px;flex-shrink:0;background:rgba(0,0,0,.2)">'
     + '<div class="nav-section">รายงาน</div>'
@@ -1856,17 +1860,45 @@ function initExecSidebar(){
 // ===== EMP LIST for evaluator =====
 function switchGrp(g,btn){
   SB_GRP=g;
+  SB_TEAM='all';
   document.querySelectorAll('.set').forEach(b=>b.classList.remove('act'));
   btn.classList.add('act');
+  buildTeamFilter();
   buildEmpList();
+}
+function switchTeam(t){
+  SB_TEAM=t;
+  buildEmpList(document.getElementById('srch')?.value||'');
+}
+function buildTeamFilter(){
+  const el=document.getElementById('sbTeamFilter');
+  if(!el) return;
+  const show = SB_GRP==='site' && SESSION && PM_TEAM_FILTER_USERS.includes(SESSION.username);
+  if(!show){ el.innerHTML=''; SB_TEAM='all'; return; }
+  const siteEmps=getMyEmps().filter(e=>e.grp==='site');
+  const teams=[...new Set(siteEmps.map(e=>e.team||null))];
+  teams.sort((a,b)=>{
+    if(a===null) return 1;
+    if(b===null) return -1;
+    return a.localeCompare(b,'th');
+  });
+  const opts=teams.map(t=>{
+    const cnt=siteEmps.filter(e=>(e.team||null)===t).length;
+    return `<option value="${t===null?'__NONE__':t}"${SB_TEAM===(t===null?'__NONE__':t)?' selected':''}>${getTeamLabel(t)} (${cnt})</option>`;
+  }).join('');
+  el.innerHTML=`<div style="padding:6px 14px 6px"><select onchange="switchTeam(this.value)" style="width:100%;padding:5px 8px;border-radius:6px;font-size:11px;background:rgba(255,255,255,.08);color:#E2E8F0;border:1px solid rgba(255,255,255,.15)">
+    <option value="all"${SB_TEAM==='all'?' selected':''}>📋 ทุกชุด (${siteEmps.length} คน)</option>
+    ${opts}
+  </select></div>`;
 }
 function filterEmpList(){buildEmpList(document.getElementById('srch')?.value||'');}
 function buildEmpList(q=''){
   q=q.toLowerCase();
   const myEmps=getMyEmps();
   const emps=myEmps
-    .filter(e=>e.grp===SB_GRP&&(!q||(e.fname+e.lname+e.id+e.pos+e.dept).toLowerCase().includes(q)))
-    .sort((a,b)=>{
+    .filter(e=>e.grp===SB_GRP
+      &&(SB_GRP!=='site'||SB_TEAM==='all'||(e.team||'__NONE__')===SB_TEAM)
+      &&(!q||(e.fname+e.lname+e.id+e.pos+e.dept).toLowerCase().includes(q))).sort((a,b)=>{
       const sa=getPosSeniority(a.pos),sb=getPosSeniority(b.pos);
       if(sa!==sb) return sa-sb;
       return (a.fname+a.lname).localeCompare(b.fname+b.lname,'th');
@@ -1925,8 +1957,8 @@ function buildEmpTabs(){
     (hasHQ?`<button class="set${SB_GRP==='hq'?' act':''}" onclick="switchGrp('hq',this)">สนญ.</button>`:'')
     +(hasSite?`<button class="set${SB_GRP==='site'?' act':''}" onclick="switchGrp('site',this)">ไซท์</button>`:'')
     +(hasFactory?`<button class="set${SB_GRP==='factory'?' act':''}" onclick="switchGrp('factory',this)">โรงงาน</button>`:'');
+  buildTeamFilter();
 }
-
 // ===== SELECT EMP (evaluator) =====
 function selEmp(id){
   CUR_EMP=EMPLOYEES.find(e=>e.id===id);
