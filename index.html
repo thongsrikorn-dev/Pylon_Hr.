@@ -1053,6 +1053,38 @@ let USERS = {
 const PYLON_STORE_KEY = 'pylonData_v1';
 let HIST = {};
 let DB = {leave:[],warn:[]};
+let EMP_TEAM_OVERRIDES = {};
+let EMP_SITE_OVERRIDES = {};
+// Persisted map of foreman team names to site (allows creating teams before members exist)
+let FOREMAN_TEAM_MAP = {};
+
+function applyEmployeeTeamOverrides(overrides){
+  if(!overrides || typeof overrides !== 'object') return;
+  Object.entries(overrides).forEach(([id, team])=>{
+    const emp = EMPLOYEES.find(e => e.id === id);
+    if(emp){
+      emp.team = team === '' ? null : team;
+    }
+  });
+}
+
+function applyEmployeeSiteOverrides(overrides){
+  if(!overrides || typeof overrides !== 'object') return;
+  Object.entries(overrides).forEach(([id, site])=>{
+    const emp = EMPLOYEES.find(e => e.id === id);
+    if(emp){
+      emp.site = site === '' ? null : site;
+    }
+  });
+}
+
+function escapeHtml(text){
+  return String(text||'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
 
 function pylonSave(){
   try{
@@ -1060,7 +1092,10 @@ function pylonSave(){
       savedAt: new Date().toISOString(),
       HIST: HIST,
       DB: DB,
-      EMP_BDAYS_OVERRIDE: window._bdayOverride||{}
+      EMP_BDAYS_OVERRIDE: window._bdayOverride||{},
+      EMP_TEAM_OVERRIDES: EMP_TEAM_OVERRIDES,
+      EMP_SITE_OVERRIDES: EMP_SITE_OVERRIDES,
+      FOREMAN_TEAM_LIST: FOREMAN_TEAM_MAP
     };
     localStorage.setItem(PYLON_STORE_KEY, JSON.stringify(payload));
   } catch(e){ console.warn('pylonSave error:', e); }
@@ -1088,6 +1123,18 @@ function pylonLoad(){
     if(payload.HIST)  Object.assign(HIST, payload.HIST);
     if(payload.DB)    Object.assign(DB,   payload.DB);
     if(payload.EMP_BDAYS_OVERRIDE) window._bdayOverride = payload.EMP_BDAYS_OVERRIDE;
+    if(payload.EMP_TEAM_OVERRIDES) Object.assign(EMP_TEAM_OVERRIDES, payload.EMP_TEAM_OVERRIDES);
+    if(payload.EMP_SITE_OVERRIDES) Object.assign(EMP_SITE_OVERRIDES, payload.EMP_SITE_OVERRIDES);
+    if(payload.FOREMAN_TEAM_LIST){
+      if(Array.isArray(payload.FOREMAN_TEAM_LIST)){
+        FOREMAN_TEAM_MAP = {};
+        payload.FOREMAN_TEAM_LIST.forEach(name=>{ if(name) FOREMAN_TEAM_MAP[name] = null; });
+      } else if(typeof payload.FOREMAN_TEAM_LIST === 'object'){
+        FOREMAN_TEAM_MAP = payload.FOREMAN_TEAM_LIST || {};
+      }
+    }
+    applyEmployeeTeamOverrides(EMP_TEAM_OVERRIDES);
+    applyEmployeeSiteOverrides(EMP_SITE_OVERRIDES);
     // Migration: recompute grade จาก totalScore ทุกครั้งที่โหลด
     // เพื่อให้เกรดสอดคล้องกับเกณฑ์ปัจจุบันเสมอ แม้ข้อมูลเก่าจะ serialize เกรดเก่าไว้
     Object.values(HIST).forEach(function(arr){
@@ -1528,6 +1575,8 @@ function initAdminSidebar(){
     + '<div class="nav-item" onclick="showDataManager()"><span class="ni">💾</span><span>สำรอง / นำเข้าข้อมูล</span></div>'
     + '<div class="nav-section">ประเมินผล</div>'
     + '<div class="nav-item" onclick="showAdminEmpList()"><span class="ni">👥</span><span>รายชื่อพนักงาน</span></div>'
+    + '<div class="nav-item" onclick="showForemanTeamManager()"><span class="ni">👷</span><span>จัดการชุดโฟร์แมน</span></div>'
+    + '<div class="nav-item" onclick="showForemanTeamHistoryReport()"><span class="ni">📑</span><span>รายงานชุดโฟร์แมน</span></div>'
     + '<div class="nav-item" onclick="showUploadEmp()"><span class="ni">📤</span><span>อัพโหลดพนักงาน</span></div>'
     + '<div class="nav-item" onclick="showLeaveDB()"><span class="ni">📁</span><span>ฐานข้อมูลการลา</span></div>'
     + '<div class="nav-section">รายงาน</div>'
@@ -1541,6 +1590,492 @@ function initAdminSidebar(){
     + '</div>';
   document.getElementById('sidebarContent').innerHTML = '<div style="flex:1;overflow-y:auto;overflow-x:hidden">' + nav + '</div>';
   showHome();
+}
+
+function getForemanTeamNames(site){
+  const fromEmps = EMPLOYEES.filter(e=>e.grp==='site' && (!site || e.site===site)).map(e=>e.team).filter(t=>t);
+  const mapTeams = Object.entries(FOREMAN_TEAM_MAP || {}).filter(([name, teamSite])=>{
+    return site ? teamSite === site : true;
+  }).map(([name])=>name);
+  const combined = fromEmps.concat(mapTeams);
+  return [...new Set(combined)].sort((a,b)=>a.localeCompare(b,'th'));
+}
+function getForemanSiteNames(){
+  const empSites = EMPLOYEES.filter(e=>e.grp==='site').map(e=>e.site).filter(s=>s);
+  const mapSites = Object.values(FOREMAN_TEAM_MAP || []).filter(s=>s);
+  return [...new Set(empSites.concat(mapSites))]
+    .sort((a,b)=>a.localeCompare(b,'th'));
+}
+function normalizeFilterQuery(q, kind){
+  const value = (q||'').trim();
+  if(!value) return '';
+  if(kind==='site' && value==='ทุกไซต์') return '';
+  if(kind==='team' && (value==='ทุกชุด' || value==='ส่วนกลาง')) return '';
+  return value;
+}
+function getForemanTeamFilterOptions(site){
+  const names = getForemanTeamNames(site);
+  return '<option value="all">ทุกชุด</option><option value="">ส่วนกลาง</option>' + names.map(t=>`<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+}
+function getForemanSiteFilterOptions(){
+  return '<option value="all">ทุกไซต์</option>' + getForemanSiteNames().map(s=>`<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+}
+function getForemanSiteOptionsMarkup(){
+  return '<option value="">- ไม่มี -</option>' + getForemanSiteNames().map(s=>`<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+}
+function showForemanTeamManager(){
+  document.getElementById('mainContent').innerHTML = `
+    <div class="card" style="padding:24px">
+      <div class="ct">จัดการชุดโฟร์แมน</div>
+      <div class="form-row" style="margin-bottom:14px">
+        <div class="fg" style="position:relative"><label>เลือกไซต์งาน</label>
+          <input id="ftSiteInput" class="login-input" placeholder="คลิกหรือพิมพ์ชื่อไซต์..." autocomplete="off"
+            onclick="showManagerSiteDropdown()" onfocus="showManagerSiteDropdown()" oninput="filterManagerSiteDropdown(this.value)" onblur="onManagerSiteBlur()" />
+          <input type="hidden" id="ftSiteValue" value="all" />
+          <div id="ftSiteDropdown" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:999;background:#fff;border:1px solid rgba(0,0,0,.12);max-height:260px;overflow-y:auto;border-radius:0 0 8px 8px;box-shadow:0 8px 24px rgba(0,0,0,.12)"></div>
+        </div>
+        <div class="fg" style="position:relative"><label>เลือกชุดโฟร์แมน</label>
+          <input id="ftTeamInput" class="login-input" placeholder="คลิกหรือพิมพ์ชื่อชุด..." autocomplete="off"
+            onclick="showManagerTeamDropdown()" onfocus="showManagerTeamDropdown()" oninput="filterManagerTeamDropdown(this.value)" onblur="onManagerTeamBlur()" />
+          <input type="hidden" id="ftTeamValue" value="all" />
+          <div id="ftTeamDropdown" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:999;background:#fff;border:1px solid rgba(0,0,0,.12);max-height:260px;overflow-y:auto;border-radius:0 0 8px 8px;box-shadow:0 8px 24px rgba(0,0,0,.12)"></div>
+        </div>
+      </div>
+      <div class="form-row" style="margin-bottom:14px">
+        <div class="fg"><label>ชื่อชุดโฟร์แมนใหม่</label>
+          <input id="newTeamName" class="login-input" placeholder="กรอกชื่อชุดใหม่..." />
+        </div>
+        <div class="fg"><label>ไซต์งานสำหรับชุดใหม่</label>
+          <input id="newTeamSite" class="login-input" list="newTeamSiteList" placeholder="พิมพ์เพื่อสร้างไซต์ใหม่หรือเลือกไซต์ที่มีอยู่" />
+          <datalist id="newTeamSiteList">
+            ${getForemanSiteNames().map(s=>`<option value="${escapeHtml(s)}"></option>`).join('')}
+          </datalist>
+        </div>
+        <div class="fg" style="display:flex;align-items:flex-end">
+          <button class="btn" onclick="createNewForemanTeam()" style="width:100%;padding:12px 14px">สร้างชุดใหม่</button>
+        </div>
+      </div>
+      <div class="form-row" style="margin-bottom:14px">
+        <div class="fg"><label>ชุดเป้าหมาย</label>
+          <select id="assignTeamSelect" class="login-input">${getManagerAssignTeamOptions(null)}</select>
+        </div>
+        <div class="fg" style="display:flex;align-items:flex-end">
+          <button class="btn" onclick="assignSelectedEmployeesToTeam()" style="width:100%;padding:12px 14px">ย้ายพนักงานที่เลือกไปชุด</button>
+        </div>
+      </div>
+      <div id="teamManagerMessage" class="info-box" style="display:none"></div>
+      <div style="overflow-x:auto">
+        <table class="admin-table" id="teamManagerTable">
+          <thead><tr>
+            <th style="width:42px;text-align:center"><input type="checkbox" id="teamManagerSelectAll" onchange="toggleTeamManagerSelectAll(this.checked)" /></th>
+            <th style="width:120px">ชื่อ</th>
+            <th style="width:120px">นามสกุล</th>
+            <th style="width:180px">ตำแหน่ง</th>
+            <th style="width:200px">ชื่อหน่วยงานก่อสร้าง</th>
+            <th style="width:180px">สังกัดชุดโฟร์แมน</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>`;
+  document.getElementById('ftSiteInput').value = '';
+  document.getElementById('ftSiteValue').value = 'all';
+  document.getElementById('ftTeamInput').value = '';
+  document.getElementById('ftTeamValue').value = 'all';
+  refreshNewTeamSiteDatalist();
+  updateAssignTeamOptions();
+  renderTeamManagerTable();
+}
+function getManagerSiteList(){
+
+  return ['all'].concat(getForemanSiteNames());
+}
+function getManagerTeamList(site){
+  return ['all', ''].concat(getForemanTeamNames(site));
+}
+function getManagerAssignTeamOptions(site){
+  const names = getForemanTeamNames(site);
+  return '<option value="">เลือกชุดเป้าหมาย</option><option value="__central__">ส่วนกลาง</option>'
+    + names.map(t=>`<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+}
+function updateAssignTeamOptions(){
+  const siteValue = document.getElementById('ftSiteValue')?.value || 'all';
+  const select = document.getElementById('assignTeamSelect');
+  if(!select) return;
+  select.innerHTML = getManagerAssignTeamOptions(siteValue==='all'?null:siteValue);
+}
+function refreshNewTeamSiteDatalist(){
+  const list = document.getElementById('newTeamSiteList');
+  if(!list) return;
+  list.innerHTML = getForemanSiteNames().map(s=>`<option value="${escapeHtml(s)}"></option>`).join('');
+}
+function toggleTeamManagerSelectAll(checked){
+  document.querySelectorAll('#teamManagerTable tbody .teamManagerRowCheckbox').forEach(ch=>{ ch.checked = checked; });
+}
+function getSelectedManagerEmployeeIds(){
+  return Array.from(document.querySelectorAll('#teamManagerTable tbody .teamManagerRowCheckbox:checked')).map(ch=>ch.value);
+}
+function assignSelectedEmployeesToTeam(){
+  const selected = getSelectedManagerEmployeeIds();
+  const select = document.getElementById('assignTeamSelect');
+  const msg = document.getElementById('teamManagerMessage');
+  if(!select || !msg) return;
+  const target = select.value;
+  if(!selected.length){ msg.style.display='block'; msg.textContent='กรุณาเลือกพนักงานก่อน'; setTimeout(()=>msg.style.display='none',2200); return; }
+  if(!target){ msg.style.display='block'; msg.textContent='กรุณาเลือกชุดเป้าหมาย'; setTimeout(()=>msg.style.display='none',2200); return; }
+  selected.forEach(id=>{
+    const emp = EMPLOYEES.find(e=>e.id===id);
+    if(emp){
+      emp.team = target==='__central__' ? null : target;
+      EMP_TEAM_OVERRIDES[id] = emp.team;
+    }
+  });
+  pylonSave();
+  msg.style.display='block';
+  msg.textContent = `ย้าย ${selected.length} คนไปชุด "${target==='__central__' ? 'ส่วนกลาง' : target}" เรียบร้อย`;
+  setTimeout(()=>msg.style.display='none',2200);
+  renderTeamManagerTable();
+}
+
+function showManagerSiteDropdown(){
+  filterManagerSiteDropdown(document.getElementById('ftSiteInput')?.value||'');
+}
+function filterManagerSiteDropdown(q){
+  q = normalizeFilterQuery(q, 'site');
+  const dd=document.getElementById('ftSiteDropdown');
+  if(!dd) return;
+  const siteList = getManagerSiteList();
+  const filtered = q.trim()
+    ? siteList.filter(s=>s==='all' || s.toLowerCase().includes(q.toLowerCase()))
+    : siteList;
+  if(!filtered.length){
+    dd.innerHTML='<div style="padding:10px 12px;font-size:12px;color:#666">ไม่พบไซต์</div>';
+    dd.style.display='block';
+    return;
+  }
+  dd.innerHTML = filtered.map(s=>{
+    const label = s==='all' ? 'ทุกไซต์' : escapeHtml(s);
+    return `<div onmousedown="_ftSitePicking=true" onclick="selectManagerSite('${escapeHtml(s)}')" style="padding:10px 12px;cursor:pointer;border-bottom:1px solid rgba(0,0,0,.08);transition:background .12s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'">${label}</div>`;
+  }).join('');
+  dd.style.display='block';
+}
+function onManagerSiteBlur(){
+  setTimeout(()=>{ if(_ftSitePicking){ _ftSitePicking=false; return; } closeManagerSiteDropdown(); },150);
+}
+function closeManagerSiteDropdown(){
+  const dd=document.getElementById('ftSiteDropdown');
+  if(dd) dd.style.display='none';
+}
+function selectManagerSite(value){
+  const input=document.getElementById('ftSiteInput');
+  const hidden=document.getElementById('ftSiteValue');
+  if(input) input.value = value==='all' ? 'ทุกไซต์' : value;
+  if(hidden) hidden.value = value;
+  closeManagerSiteDropdown();
+  updateManagerTeamFilterAndRender();
+}
+
+function showManagerTeamDropdown(){
+  filterManagerTeamDropdown(document.getElementById('ftTeamInput')?.value||'');
+}
+function filterManagerTeamDropdown(q){
+  q = normalizeFilterQuery(q, 'team');
+  const dd=document.getElementById('ftTeamDropdown');
+  if(!dd) return;
+  const siteValue = document.getElementById('ftSiteValue')?.value || 'all';
+  const teamList = getManagerTeamList(siteValue==='all'?null:siteValue);
+  const filtered = q.trim()
+    ? teamList.filter(t=>t==='all' || t==='' || t.toLowerCase().includes(q.toLowerCase()))
+    : teamList;
+  if(!filtered.length){
+    dd.innerHTML='<div style="padding:10px 12px;font-size:12px;color:#666">ไม่พบชุดโฟร์แมน</div>';
+    dd.style.display='block';
+    return;
+  }
+  dd.innerHTML = filtered.map(t=>{
+    const label = t==='all' ? 'ทุกชุด' : t==='' ? 'ส่วนกลาง' : escapeHtml(t);
+    return `<div onmousedown="_ftTeamPicking=true" onclick="selectManagerTeam('${escapeHtml(t)}')" style="padding:10px 12px;cursor:pointer;border-bottom:1px solid rgba(0,0,0,.08);transition:background .12s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'">${label}</div>`;
+  }).join('');
+  dd.style.display='block';
+}
+function onManagerTeamBlur(){
+  setTimeout(()=>{ if(_ftTeamPicking){ _ftTeamPicking=false; return; } closeManagerTeamDropdown(); },150);
+}
+function closeManagerTeamDropdown(){
+  const dd=document.getElementById('ftTeamDropdown');
+  if(dd) dd.style.display='none';
+}
+function selectManagerTeam(value){
+  const input=document.getElementById('ftTeamInput');
+  const hidden=document.getElementById('ftTeamValue');
+  if(input) input.value = value==='all' ? 'ทุกชุด' : value==='' ? 'ส่วนกลาง' : value;
+  if(hidden) hidden.value = value;
+  closeManagerTeamDropdown();
+  renderTeamManagerTable();
+}
+
+function updateManagerTeamFilterAndRender(){
+  const teamInput = document.getElementById('ftTeamInput');
+  const teamHidden = document.getElementById('ftTeamValue');
+  if(teamInput) teamInput.value = '';
+  if(teamHidden) teamHidden.value = 'all';
+  updateAssignTeamOptions();
+  renderTeamManagerTable();
+}
+
+function renderTeamManagerTable(){
+  const tbody = document.querySelector('#teamManagerTable tbody');
+  if(!tbody) return;
+  const siteFilter = document.getElementById('ftSiteValue')?.value || 'all';
+  const teamFilter = document.getElementById('ftTeamValue')?.value || 'all';
+  const rows = EMPLOYEES.filter(e=>e.grp==='site').filter(e=>{
+    if(siteFilter!=='all' && e.site!==siteFilter) return false;
+    if(teamFilter==='') return !e.team;
+    if(teamFilter!=='all') return (e.team||'')===teamFilter;
+    return true;
+  }).sort((a,b)=>{
+    const sa = a.site || '';
+    const sb = b.site || '';
+    if(sa!==sb) return sa.localeCompare(sb,'th');
+    const ta = a.team||'';
+    const tb = b.team||'';
+    if(ta!==tb) return ta.localeCompare(tb,'th');
+    return (a.fname+a.lname).localeCompare(b.fname+b.lname,'th');
+  });
+  if(!rows.length){
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:16px;text-align:center;color:#7C7C7C">ไม่พบข้อมูล</td></tr>';
+    const all = document.getElementById('teamManagerSelectAll');
+    if(all) all.checked = false;
+    return;
+  }
+  tbody.innerHTML = rows.map(e=>{
+    return `<tr>
+      <td style="text-align:center"><input type="checkbox" class="teamManagerRowCheckbox" value="${escapeHtml(e.id)}" /></td>
+      <td>${escapeHtml(e.fname)}</td>
+      <td>${escapeHtml(e.lname)}</td>
+      <td>${escapeHtml(e.pos)}</td>
+      <td>${escapeHtml(e.site||'-')}</td>
+      <td>${escapeHtml(e.team||'ส่วนกลาง')}</td>
+    </tr>`;
+  }).join('');
+  const all = document.getElementById('teamManagerSelectAll');
+  if(all) all.checked = false;
+}
+function saveTeamForEmp(empId, teamValue){
+  const emp = EMPLOYEES.find(e=>e.id===empId);
+  if(!emp) return;
+  emp.team = teamValue || null;
+  EMP_TEAM_OVERRIDES[empId] = emp.team;
+  pylonSave();
+  const msg = document.getElementById('teamManagerMessage');
+  if(msg){
+    msg.style.display = 'block';
+    msg.textContent = `บันทึกชุดของ ${emp.prefix||''}${emp.fname} ${emp.lname} เป็น ${emp.team||'ส่วนกลาง (ไม่มีชุด)'}`;
+    setTimeout(()=>{ if(msg) msg.style.display='none'; }, 2600);
+  }
+  renderTeamManagerTable();
+}
+
+function saveSiteForEmp(empId, siteValue){
+  const emp = EMPLOYEES.find(e=>e.id===empId);
+  if(!emp) return;
+  emp.site = siteValue || null;
+  EMP_SITE_OVERRIDES[empId] = emp.site;
+  pylonSave();
+  const msg = document.getElementById('teamManagerMessage');
+  if(msg){
+    msg.style.display = 'block';
+    msg.textContent = `ย้ายไซต์ของ ${emp.prefix||''}${emp.fname} ${emp.lname} เป็น ${emp.site||'- ไม่มี -'}`;
+    setTimeout(()=>{ if(msg) msg.style.display='none'; }, 2600);
+  }
+  renderTeamManagerTable();
+}
+
+function createNewForemanTeam(){
+  const input = document.getElementById('newTeamName');
+  const siteSelect = document.getElementById('newTeamSite');
+  if(!input || !siteSelect) return;
+  const name = (input.value||'').trim();
+  const site = (siteSelect.value||'').trim();
+  const msg = document.getElementById('teamManagerMessage');
+  if(!name){ if(msg){ msg.style.display='block'; msg.textContent='กรุณากรอกชื่อทีมก่อน'; setTimeout(()=>msg.style.display='none',2200);} return; }
+  if(!site){ if(msg){ msg.style.display='block'; msg.textContent='กรุณาเลือกไซต์สำหรับทีมใหม่'; setTimeout(()=>msg.style.display='none',2200);} return; }
+  const existing = getForemanTeamNames();
+  if(existing.includes(name)){
+    if(msg){ msg.style.display='block'; msg.textContent=`ทีม "${name}" มีอยู่แล้ว`; setTimeout(()=>msg.style.display='none',2200);} return;
+  }
+  FOREMAN_TEAM_MAP[name] = site;
+  pylonSave();
+  if(msg){ msg.style.display='block'; msg.textContent=`เพิ่มทีม "${name}" เรียบร้อย`; setTimeout(()=>msg.style.display='none',2200);} 
+  input.value='';
+  siteSelect.value='';
+  refreshNewTeamSiteDatalist();
+  updateManagerTeamFilterAndRender();
+}
+
+let _rftSitePicking = false;
+let _rftTeamPicking = false;
+function showForemanTeamHistoryReport(){
+  const mc=document.getElementById('mainContent');
+  mc.innerHTML = `
+  <div class="card" style="padding:24px">
+    <div class="ct">รายงานชุดโฟร์แมน</div>
+    <div class="form-row" style="margin-bottom:14px">
+      <div class="fg" style="position:relative"><label>เลือกไซต์งาน</label>
+        <input id="rftSiteInput" class="login-input" placeholder="คลิกหรือพิมพ์ชื่อไซต์..." autocomplete="off"
+          onclick="showForemanSiteDropdown()" onfocus="showForemanSiteDropdown()" oninput="filterForemanSiteDropdown(this.value)" onblur="onForemanSiteBlur()" />
+        <input type="hidden" id="rftSiteValue" value="all" />
+        <div id="rftSiteDropdown" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:999;background:#fff;border:1px solid rgba(0,0,0,.12);max-height:280px;overflow-y:auto;border-radius:0 0 8px 8px;box-shadow:0 8px 24px rgba(0,0,0,.12)"></div>
+      </div>
+      <div class="fg" style="position:relative"><label>เลือกชุดโฟร์แมน</label>
+        <input id="rftTeamInput" class="login-input" placeholder="คลิกหรือพิมพ์ชื่อชุด..." autocomplete="off"
+          onclick="showForemanTeamDropdown()" onfocus="showForemanTeamDropdown()" oninput="filterForemanTeamDropdown(this.value)" onblur="onForemanTeamBlur()" />
+        <input type="hidden" id="rftTeamValue" value="all" />
+        <div id="rftTeamDropdown" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:999;background:#fff;border:1px solid rgba(0,0,0,.12);max-height:280px;overflow-y:auto;border-radius:0 0 8px 8px;box-shadow:0 8px 24px rgba(0,0,0,.12)"></div>
+      </div>
+    </div>
+    <div id="foremanTeamHistoryReport"></div>
+  </div>`;
+  document.getElementById('rftSiteInput').value = '';
+  document.getElementById('rftSiteValue').value = 'all';
+  document.getElementById('rftTeamInput').value = '';
+  document.getElementById('rftTeamValue').value = 'all';
+  renderForemanTeamHistoryReport();
+}
+
+function getForemanSiteList(){
+  return ['all'].concat(getForemanSiteNames());
+}
+function getForemanTeamList(site){
+  return ['all', ''].concat(getForemanTeamNames(site));
+}
+
+function showForemanSiteDropdown(){
+  filterForemanSiteDropdown(document.getElementById('rftSiteInput')?.value||'');
+}
+function filterForemanSiteDropdown(q){
+  q = normalizeFilterQuery(q, 'site');
+  const dd=document.getElementById('rftSiteDropdown');
+  if(!dd) return;
+  const siteList = getForemanSiteList();
+  const filtered = q.trim()
+    ? siteList.filter(s=>s==='all' || s.toLowerCase().includes(q.toLowerCase()))
+    : siteList;
+  if(!filtered.length){
+    dd.innerHTML='<div style="padding:10px 12px;font-size:12px;color:#666">ไม่พบไซต์</div>';
+    dd.style.display='block';
+    return;
+  }
+  dd.innerHTML = filtered.map(s=>{
+    const label = s==='all' ? 'ทุกไซต์' : escapeHtml(s);
+    return `<div onmousedown="_rftSitePicking=true" onclick="selectForemanSite('${escapeHtml(s)}')" style="padding:10px 12px;cursor:pointer;border-bottom:1px solid rgba(0,0,0,.08);transition:background .12s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'">${label}</div>`;
+  }).join('');
+  dd.style.display='block';
+}
+function onForemanSiteBlur(){
+  setTimeout(()=>{ if(_rftSitePicking){ _rftSitePicking=false; return; } closeForemanSiteDropdown(); },150);
+}
+function closeForemanSiteDropdown(){
+  const dd=document.getElementById('rftSiteDropdown');
+  if(dd) dd.style.display='none';
+}
+function selectForemanSite(value){
+  const input=document.getElementById('rftSiteInput');
+  const hidden=document.getElementById('rftSiteValue');
+  if(input) input.value = value==='all' ? 'ทุกไซต์' : value;
+  if(hidden) hidden.value = value;
+  closeForemanSiteDropdown();
+  updateForemanTeamHistoryFilterAndRender();
+}
+
+function showForemanTeamDropdown(){
+  filterForemanTeamDropdown(document.getElementById('rftTeamInput')?.value||'');
+}
+function filterForemanTeamDropdown(q){
+  q = normalizeFilterQuery(q, 'team');
+  const dd=document.getElementById('rftTeamDropdown');
+  if(!dd) return;
+  const siteValue = document.getElementById('rftSiteValue')?.value || 'all';
+  const teamList = getForemanTeamList(siteValue==='all'?null:siteValue);
+  const filtered = q.trim()
+    ? teamList.filter(t=>t==='all' || t==='' || t.toLowerCase().includes(q.toLowerCase()))
+    : teamList;
+  if(!filtered.length){
+    dd.innerHTML='<div style="padding:10px 12px;font-size:12px;color:#666">ไม่พบชุดโฟร์แมน</div>';
+    dd.style.display='block';
+    return;
+  }
+  dd.innerHTML = filtered.map(t=>{
+    const label = t==='all' ? 'ทุกชุด' : t==='' ? 'ส่วนกลาง' : escapeHtml(t);
+    return `<div onmousedown="_rftTeamPicking=true" onclick="selectForemanTeam('${escapeHtml(t)}')" style="padding:10px 12px;cursor:pointer;border-bottom:1px solid rgba(0,0,0,.08);transition:background .12s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'">${label}</div>`;
+  }).join('');
+  dd.style.display='block';
+}
+function onForemanTeamBlur(){
+  setTimeout(()=>{ if(_rftTeamPicking){ _rftTeamPicking=false; return; } closeForemanTeamDropdown(); },150);
+}
+function closeForemanTeamDropdown(){
+  const dd=document.getElementById('rftTeamDropdown');
+  if(dd) dd.style.display='none';
+}
+function selectForemanTeam(value){
+  const input=document.getElementById('rftTeamInput');
+  const hidden=document.getElementById('rftTeamValue');
+  if(input) input.value = value==='all' ? 'ทุกชุด' : value==='' ? 'ส่วนกลาง' : value;
+  if(hidden) hidden.value = value;
+  closeForemanTeamDropdown();
+  renderForemanTeamHistoryReport();
+}
+
+function updateForemanTeamHistoryFilterAndRender(){
+  const siteValue = document.getElementById('rftSiteValue')?.value || 'all';
+  const teamInput = document.getElementById('rftTeamInput');
+  const teamHidden = document.getElementById('rftTeamValue');
+  if(teamInput) teamInput.value = '';
+  if(teamHidden) teamHidden.value = 'all';
+  renderForemanTeamHistoryReport();
+}
+
+function renderForemanTeamHistoryReport(){
+  const container = document.getElementById('foremanTeamHistoryReport');
+  if(!container) return;
+  const siteFilter = document.getElementById('rftSiteValue')?.value || 'all';
+  const teamFilter = document.getElementById('rftTeamValue')?.value || 'all';
+  const emps = EMPLOYEES.filter(e=>e.grp==='site').filter(e=>{
+    if(siteFilter!=='all' && e.site!==siteFilter) return false;
+    if(teamFilter==='') return !e.team;
+    if(teamFilter!=='all') return (e.team||'')===teamFilter;
+    return true;
+  });
+  const historyRows = [];
+  emps.forEach(e=>{
+    const recs = (HIST[e.id]||[]).filter(h=>h.type==='site');
+    recs.forEach(r=>{ historyRows.push({emp:e,rec:r}); });
+  });
+  historyRows.sort((a,b)=>{ return (b.rec.date||'').localeCompare(a.rec.date||''); });
+  const totalEvals = historyRows.length;
+  const allScores = historyRows.map(x=>parseFloat(x.rec.totalScore||0)).filter(n=>!Number.isNaN(n));
+  const avgScore = allScores.length? (allScores.reduce((a,b)=>a+b,0)/allScores.length).toFixed(2):'—';
+  const gradeCounts = {A:0,B:0,C:0,D:0,F:0};
+  allScores.forEach(score=>{ const g=getGrade(score).g; if(gradeCounts[g]!=null) gradeCounts[g]++; });
+  const teamLabel = teamFilter==='all' ? 'ทุกชุด' : teamFilter==='' ? 'ส่วนกลาง' : teamFilter;
+  const siteLabel = siteFilter==='all' ? 'ทุกไซต์' : siteFilter;
+  const summaryHtml = `
+    <div class="dash-grid" style="grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
+      <div class="card" style="text-align:center"><div style="font-size:28px;font-weight:800;color:var(--info)">${emps.length}</div><div style="font-size:12px;color:var(--g500)">พนักงานในทีม</div></div>
+      <div class="card" style="text-align:center"><div style="font-size:28px;font-weight:800;color:var(--p600)">${totalEvals}</div><div style="font-size:12px;color:var(--g500)">การประเมินย้อนหลัง</div></div>
+      <div class="card" style="text-align:center"><div style="font-size:28px;font-weight:800;color:var(--success)">${avgScore}</div><div style="font-size:12px;color:var(--g500)">คะแนนเฉลี่ยย้อนหลัง</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px"><div class="ct">${siteLabel} — ${teamLabel}</div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">${Object.entries(gradeCounts).map(([g,c])=>`<div style="flex:1;min-width:100px;padding:12px;border:1px solid var(--border);border-radius:10px;text-align:center"><div style="font-size:18px;font-weight:800">${c}</div><div style="font-size:11px;color:var(--g500)">${g}</div></div>`).join('')}</div>
+    </div>`;
+  const empTable = `
+    <div class="card" style="margin-bottom:16px"><div class="ct">พนักงานในทีม</div>
+      <div style="overflow-x:auto"><table class="admin-table" style="width:100%"><thead><tr><th>ชื่อ</th><th>นามสกุล</th><th>ตำแหน่ง</th><th>ไซต์</th><th>ทีม</th><th>ครั้งประเมิน</th><th>คะแนนเฉลี่ย</th></tr></thead><tbody>${emps.map(e=>{ const recs=(HIST[e.id]||[]).filter(h=>h.type==='site'); const scores=recs.map(r=>parseFloat(r.totalScore||0)).filter(n=>!Number.isNaN(n)); const avg=scores.length?(scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(2):'—'; return `<tr><td>${escapeHtml(e.fname)}</td><td>${escapeHtml(e.lname)}</td><td>${escapeHtml(e.pos)}</td><td>${escapeHtml(e.site||'-')}</td><td>${escapeHtml(e.team||'ส่วนกลาง')}</td><td style="text-align:center">${recs.length}</td><td style="text-align:center">${avg}</td></tr>`; }).join('')}</tbody></table></div></div>`;
+  const historyTable = `
+    <div class="card"><div class="ct">ประวัติการประเมินย้อนหลัง</div>
+      <div style="overflow-x:auto"><table class="admin-table" style="width:100%"><thead><tr><th style="width:120px">วันที่</th><th>พนักงาน</th><th style="width:80px">คะแนน</th><th style="width:60px">เกรด</th><th style="width:130px">โครงการ</th><th>หมายเหตุ</th></tr></thead><tbody>${historyRows.map(x=>`<tr><td>${escapeHtml(x.rec.date||'-')}</td><td>${escapeHtml(x.emp.prefix||'')}${escapeHtml(x.emp.fname)} ${escapeHtml(x.emp.lname)}</td><td style="text-align:center">${escapeHtml(x.rec.totalScore||'-')}</td><td style="text-align:center"><span class="gp ${safeGrade(x.rec).cls}">${safeGrade(x.rec).g}</span></td><td>${escapeHtml(x.rec.project||x.rec.evalType||'-')}</td><td>${escapeHtml(x.rec.comment||'')}</td></tr>`).join('')}</tbody></table></div></div>`;
+  container.innerHTML = summaryHtml + empTable + (historyRows.length?historyTable:`<div class="card" style="text-align:center;color:var(--g500)">ยังไม่มีประวัติการประเมินสำหรับชุดนี้</div>`);
 }
 
 // ===== ลำดับความอาวุโสตามตำแหน่ง =====
